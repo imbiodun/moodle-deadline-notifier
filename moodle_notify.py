@@ -99,7 +99,8 @@ def main():
     message = build_message(events, days_ahead)
 
     if message is None:
-        print("Nothing due soon — no notification sent.")
+       send_notification(ntfy_topic, "Nothing due in the next few days. Roll to the other side of the Bed ):!", urgent=False)
+        print("Nothing due soon — sent an all-clear notification.")
         return
 
     has_overdue = "overdue" in message
