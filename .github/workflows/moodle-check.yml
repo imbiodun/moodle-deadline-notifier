@@ -4,7 +4,7 @@ on:
   schedule:
     # Runs at 06:00 UTC daily (~08:00/09:00 Finland time depending on DST).
     # Adjust the cron below if you want a different time.
-    - cron: "0 3 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
 
 jobs:
