@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""
-moodle_notify.py — checks your Moodle deadlines and pushes a phone
-notification (via ntfy.sh) for anything due soon or overdue.
-
-Designed to run headless (e.g. in GitHub Actions), reading its config
-from environment variables instead of local files:
-
-    MOODLE_URL   -> your Moodle calendar feed URL (Calendar -> Export
-                    calendar -> Events related to courses -> Get calendar URL)
-    NTFY_TOPIC   -> a secret topic name you invent, e.g. "abiodun-uef-x7f2"
-                    (anyone who knows this exact name can see your notifications,
-                    so make it long and not guessable — do not use your real name alone)
-    DAYS_AHEAD   -> optional, defaults to 3. Notify for anything due within
-                    this many days, plus anything already overdue.
-
-Run locally to test:
-    MOODLE_URL="https://..." NTFY_TOPIC="your-topic" python3 moodle_notify.py
-"""
 
 import os
 import sys
