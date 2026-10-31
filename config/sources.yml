@@ -1,0 +1,9 @@
+- name: University of Eastern Finland
+  type: ical
+  secret: UEF_ICAL_URL
+- name: Tampere University
+  type: ical
+  secret: TUNI_ICAL_URL
+- name: Personal deadlines
+  type: manual
+  secret: ""

@@ -1,0 +1,44 @@
+name: Daily assignment digest
+
+on:
+  schedule:
+    # 05:00 UTC is about 07:00 in Finland during winter time.
+    # Adjust this cron in summer if a fixed local delivery time is required.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install requests icalendar PyYAML
+
+      - name: Build and send digest
+        env:
+          UEF_ICAL_URL: ${{ secrets.UEF_ICAL_URL }}
+          TUNI_ICAL_URL: ${{ secrets.TUNI_ICAL_URL }}
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
+        run: python main.py
+
+      - name: Commit state if changed
+        run: |
+          if git diff --quiet -- state.json; then
+            echo "state.json did not change"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "Update reminder state"
+          git push

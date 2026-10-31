@@ -15,6 +15,7 @@ import yaml
 from zoneinfo import ZoneInfo
 
 from adapters.ical import load_ical
+from adapters.manual import load_manual
 
 LOGGER = logging.getLogger(__name__)
 HELSINKI = ZoneInfo("Europe/Helsinki")
@@ -36,9 +37,22 @@ def load_deadlines(
     records: dict[tuple[str, str], dict[str, Any]] = {}
 
     for source_config in sources:
-        if source_config.get("type") != "ical":
-            continue
         name = str(source_config.get("name", "unnamed source"))
+        source_type = source_config.get("type")
+        if source_type == "manual":
+            try:
+                events = load_manual(Path(sources_path).parent / "manual.yml", source=name)
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                failures.append(f"{name}: {type(exc).__name__}")
+                LOGGER.exception("Unable to load source %s", name)
+                continue
+            for event in events:
+                event = _normalize_event(event, course_map)
+                if not _ignored(event, ignore) and event["due"] >= current - timedelta(days=1):
+                    records[(event["source"], event["id"])] = event
+            continue
+        if source_type != "ical":
+            continue
         secret_name = source_config.get("secret")
         url = os.environ.get(secret_name, "") if secret_name else ""
         if not url:
