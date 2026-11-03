@@ -18,22 +18,29 @@ class Notifier(Protocol):
         """Deliver a message."""
 
 
-class CallMeBotNotifier:
-    """Send messages through the CallMeBot WhatsApp gateway."""
+class TelegramNotifier:
+    """Send messages through the Telegram Bot API."""
 
-    def __init__(self, phone: str | None = None, api_key: str | None = None) -> None:
-        self.phone = phone or os.environ.get("WHATSAPP_PHONE", "")
-        self.api_key = api_key or os.environ.get("CALLMEBOT_API_KEY", "")
-        if not self.phone or not self.api_key:
-            raise ValueError("WHATSAPP_PHONE and CALLMEBOT_API_KEY are required")
+    def __init__(
+        self,
+        bot_token: str | None = None,
+        chat_id: str | None = None,
+    ) -> None:
+        self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not self.bot_token or not self.chat_id:
+            raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
 
     def send(self, message: str) -> None:
-        response = requests.get(
-            "https://api.callmebot.com/whatsapp.php",
-            params={"phone": self.phone, "text": message, "apikey": self.api_key},
+        response = requests.post(
+            f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+            json={"chat_id": self.chat_id, "text": message},
             timeout=15,
         )
         response.raise_for_status()
+        result = response.json()
+        if not result.get("ok", False):
+            raise RuntimeError("Telegram rejected the message")
 
 
 def build_digest(

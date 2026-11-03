@@ -27,8 +27,8 @@ jobs:
         env:
           UEF_ICAL_URL: ${{ secrets.UEF_ICAL_URL }}
           TUNI_ICAL_URL: ${{ secrets.TUNI_ICAL_URL }}
-          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
-          CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
 
       - name: Commit state if changed

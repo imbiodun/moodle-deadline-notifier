@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core import HELSINKI, load_deadlines
-from notify import CallMeBotNotifier, build_digest, load_state, mark_sent, save_state
+from notify import TelegramNotifier, build_digest, load_state, mark_sent, save_state
 
 
 def main() -> None:
@@ -30,7 +30,7 @@ def main() -> None:
         print(digest)
         return
 
-    CallMeBotNotifier().send(digest)
+    TelegramNotifier().send(digest)
     mark_sent(state, events)
     save_state(args.state, state)
 
