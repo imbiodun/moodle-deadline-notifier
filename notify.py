@@ -225,10 +225,14 @@ def _when(days_left: int) -> str:
 def load_state(path: str | Path) -> dict[str, Any]:
     state_path = Path(path)
     if not state_path.exists():
-        return {"done": {}, "offset": 0}
+        return {"done": {}, "offset": 0, "last_sent": ""}
     with state_path.open(encoding="utf-8") as file:
         state = json.load(file)
-    return {"done": _as_done_map(state.get("done")), "offset": int(state.get("offset", 0) or 0)}
+    return {
+        "done": _as_done_map(state.get("done")),
+        "offset": int(state.get("offset", 0) or 0),
+        "last_sent": str(state.get("last_sent", "")),
+    }
 
 
 def _as_done_map(done: Any) -> dict[str, dict[str, str]]:
@@ -263,6 +267,15 @@ def mark_done(
         }
         dismissed.append(state["done"][token]["title"] or token)
     return dismissed
+
+
+def already_sent_today(state: dict[str, Any], *, now: datetime) -> bool:
+    """Whether a digest has already gone out on the current local date."""
+    return str(state.get("last_sent", "")) == now.date().isoformat()
+
+
+def record_digest_sent(state: dict[str, Any], *, now: datetime) -> None:
+    state["last_sent"] = now.date().isoformat()
 
 
 def prune_done(state: dict[str, Any], *, now: datetime) -> None:

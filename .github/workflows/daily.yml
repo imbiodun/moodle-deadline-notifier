@@ -1,11 +1,25 @@
 name: Daily assignment digest
 
+# Scheduled runs on shared runners are heavily deprioritised: every run between
+# 2026-11-01 and 2026-11-14 started 6.5-8.6h after its 05:00 UTC cron time, so a
+# "morning" digest was arriving mid-afternoon in Helsinki. workflow_dispatch runs
+# are not queued that way, so an external cron calls the dispatch API instead:
+#
+#   POST /repos/imbiodun/moodle-deadline-notifier/actions/workflows/daily.yml/dispatches
+#   {"ref": "main"}
+#
+# The schedule below stays only as a safety net for the external caller going
+# down. --once-per-day means whichever fires first wins and the other exits
+# without sending, so a late schedule run cannot produce a second digest.
 on:
-  schedule:
-    # 05:00 UTC is about 07:00 in Finland during winter time.
-    # Adjust this cron in summer if a fixed local delivery time is required.
-    - cron: "0 5 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Send even if a digest already went out today"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "23 5 * * *"
 
 permissions:
   contents: write
@@ -20,6 +34,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
@@ -30,7 +45,10 @@ jobs:
           TUNI_ICAL_URL: ${{ secrets.TUNI_ICAL_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        # Inverted deliberately: in `a && b || c` an empty-string b is falsy and
+        # collapses to c, so the flag has to sit on the truthy side. On a schedule
+        # event `inputs` is null, which negates to true and keeps the guard on.
+        run: python main.py ${{ !inputs.force && '--once-per-day' || '' }}
 
       - name: Commit state if changed
         run: |

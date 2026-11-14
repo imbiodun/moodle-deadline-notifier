@@ -4,12 +4,14 @@ from zoneinfo import ZoneInfo
 
 from notify import (
     TelegramNotifier,
+    already_sent_today,
     build_digest,
     deadline_token,
     done_buttons,
     load_state,
     mark_done,
     prune_done,
+    record_digest_sent,
     save_state,
     split_message,
 )
@@ -231,7 +233,7 @@ def test_state_round_trip_and_legacy_migration(tmp_path):
 
 
 def test_load_state_defaults_when_missing(tmp_path):
-    assert load_state(tmp_path / "absent.json") == {"done": {}, "offset": 0}
+    assert load_state(tmp_path / "absent.json") == {"done": {}, "offset": 0, "last_sent": ""}
 
 
 def test_digest_phrases_day_counts_for_a_human():
@@ -299,3 +301,23 @@ def test_telegram_notifier_splits_long_digests_and_buttons_ride_the_last(monkeyp
     assert "reply_markup" not in sent[0]
     assert "reply_markup" in sent[-1]
     assert "\n".join(payload["text"] for payload in sent) == message
+
+
+def test_already_sent_today_tracks_the_local_date():
+    state = {"done": {}, "offset": 0, "last_sent": ""}
+    assert not already_sent_today(state, now=NOW)
+
+    record_digest_sent(state, now=NOW)
+    assert state["last_sent"] == "2030-01-01"
+    assert already_sent_today(state, now=NOW)
+
+    assert not already_sent_today(state, now=NOW + timedelta(days=1))
+
+
+def test_last_sent_survives_a_state_round_trip(tmp_path):
+    path = tmp_path / "state.json"
+    state = {"done": {}, "offset": 0, "last_sent": ""}
+    record_digest_sent(state, now=NOW)
+    save_state(path, state)
+
+    assert already_sent_today(load_state(path), now=NOW)
