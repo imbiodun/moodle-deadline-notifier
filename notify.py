@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 import requests
 
+LOGGER = logging.getLogger(__name__)
+DONE_PREFIX = "done:"
+KEEP_DONE_FOR = timedelta(days=30)
+MESSAGE_LIMIT = 4096  # Telegram's hard cap on sendMessage text
+
 
 class Notifier(Protocol):
     """Interface implemented by notification providers."""
 
-    def send(self, message: str) -> None:
-        """Deliver a message."""
+    def send(self, message: str, buttons: list[dict[str, str]] | None = None) -> None:
+        """Deliver a message, optionally with dismiss buttons attached."""
 
 
 class TelegramNotifier:
@@ -31,16 +39,133 @@ class TelegramNotifier:
         if not self.bot_token or not self.chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
 
-    def send(self, message: str) -> None:
+    def send(self, message: str, buttons: list[dict[str, str]] | None = None) -> None:
+        chunks = split_message(message)
+        for chunk in chunks[:-1]:
+            self._call("sendMessage", {"chat_id": self.chat_id, "text": chunk})
+
+        # Buttons ride on the final chunk so every deadline is already on screen.
+        payload: dict[str, Any] = {"chat_id": self.chat_id, "text": chunks[-1]}
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": [[button] for button in buttons]}
+        self._call("sendMessage", payload)
+
+    def collect_done(self, offset: int = 0) -> tuple[set[str], int]:
+        """Drain dismiss taps queued since the last run, with the offset to store next."""
+        payload: dict[str, Any] = {"timeout": 0, "allowed_updates": ["callback_query"]}
+        if offset:
+            payload["offset"] = offset
+        updates = self._call("getUpdates", payload) or []
+
+        tokens: set[str] = set()
+        next_offset = offset
+        for update in updates:
+            next_offset = max(next_offset, int(update["update_id"]) + 1)
+            query = update.get("callback_query")
+            if not query:
+                continue
+            chat = query.get("message", {}).get("chat", {})
+            if str(chat.get("id", self.chat_id)) != str(self.chat_id):
+                continue
+            data = str(query.get("data", ""))
+            if data.startswith(DONE_PREFIX):
+                tokens.add(data[len(DONE_PREFIX) :])
+            self._acknowledge(query.get("id"))
+        return tokens, next_offset
+
+    def _acknowledge(self, query_id: str | None) -> None:
+        if not query_id:
+            return
+        try:
+            self._call(
+                "answerCallbackQuery",
+                {"callback_query_id": query_id, "text": "Marked done"},
+            )
+        except (requests.RequestException, RuntimeError):
+            # Telegram drops callback ids after a minute or so, long before the next
+            # daily run. The tap itself is already recorded, so this is cosmetic.
+            LOGGER.debug("Could not acknowledge callback %s", query_id)
+
+    def _call(self, method: str, payload: dict[str, Any]) -> Any:
         response = requests.post(
-            f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-            json={"chat_id": self.chat_id, "text": message},
+            f"https://api.telegram.org/bot{self.bot_token}/{method}",
+            json=payload,
             timeout=15,
         )
         response.raise_for_status()
         result = response.json()
         if not result.get("ok", False):
-            raise RuntimeError("Telegram rejected the message")
+            raise RuntimeError(f"Telegram rejected the {method} request")
+        return result.get("result")
+
+
+def split_message(message: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Break a digest into Telegram-sized pieces, splitting on line breaks.
+
+    Telegram rejects anything past 4096 characters outright, so a long digest would
+    otherwise fail entirely rather than arrive in parts.
+    """
+    if len(message) <= limit:
+        return [message]
+
+    chunks: list[str] = []
+    current = ""
+    for line in message.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        while len(line) > limit:  # a single line longer than the limit must still be cut
+            chunks.append(line[:limit])
+            line = line[limit:]
+        current = line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def deadline_token(identifier: str) -> str:
+    """Short stable handle for a deadline, within Telegram's 64-byte callback limit."""
+    return hashlib.sha1(identifier.encode("utf-8")).hexdigest()[:16]
+
+
+def active_deadlines(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime,
+    done_tokens: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Deadlines worth showing today: not dismissed, and due within five days."""
+    done = done_tokens or set()
+    current = now.date()
+    active = [
+        event
+        for event in events
+        if deadline_token(event["id"]) not in done
+        and (event["due"].date() - current).days <= 5
+    ]
+    active.sort(key=lambda event: event["due"])
+    return active
+
+
+def done_buttons(events: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
+    """One dismiss button per shown deadline."""
+    return [
+        {
+            "text": f"✅ {_shorten(str(event['title']))}",
+            "callback_data": f"{DONE_PREFIX}{deadline_token(event['id'])}",
+        }
+        for event in events
+    ]
+
+
+def _shorten(title: str, limit: int = 40) -> str:
+    collapsed = " ".join(title.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
 
 
 def build_digest(
@@ -48,17 +173,11 @@ def build_digest(
     failures: list[str] | None = None,
     *,
     now: datetime,
-    done_ids: set[str] | None = None,
+    done_tokens: set[str] | None = None,
 ) -> str:
     """Build the morning digest for overdue and five-day deadlines."""
-    done = done_ids or set()
+    active = active_deadlines(events, now=now, done_tokens=done_tokens)
     current = now.date()
-    active = [
-        event
-        for event in events
-        if event["id"] not in done and (event["due"].date() - current).days <= 5
-    ]
-    active.sort(key=lambda event: event["due"])
     sections: list[str] = []
 
     if failures:
@@ -69,44 +188,94 @@ def build_digest(
         ("DUE WITHIN 3 DAYS (URGENT)", lambda days: 0 <= days <= 3),
         ("DUE IN 4-5 DAYS (HEADS UP)", lambda days: 4 <= days <= 5),
     )
+    listed = False
     for heading, predicate in groups:
         matching = [
             event for event in active if predicate((event["due"].date() - current).days)
         ]
         if matching:
+            listed = True
             lines = [heading]
             lines.extend(_format_event(event, current) for event in matching)
             sections.append("\n".join(lines))
 
-    if not any(section.splitlines()[0] in {heading for heading, _ in groups} for section in sections):
+    if not listed:
         sections.append("Nothing due in the next 5 days.")
     return "\n\n".join(sections)
 
 
 def _format_event(event: dict[str, Any], current: Any) -> str:
+    course = str(event["course"]).strip()
+    label = f"{course}: {event['title']}" if course else str(event["title"])
     days_left = (event["due"].date() - current).days
-    return (
-        f"- {event['course']}: {event['title']} — "
-        f"{event['due']:%Y-%m-%d %H:%M} ({days_left} days left)"
-    )
+    return f"- {label} — {event['due']:%a %d %b %H:%M} ({_when(days_left)})"
+
+
+def _when(days_left: int) -> str:
+    """Phrase a day count the way a reminder should read."""
+    if days_left < 0:
+        return f"{abs(days_left)}d overdue"
+    if days_left == 0:
+        return "due today"
+    if days_left == 1:
+        return "due tomorrow"
+    return f"in {days_left} days"
 
 
 def load_state(path: str | Path) -> dict[str, Any]:
     state_path = Path(path)
     if not state_path.exists():
-        return {"sent": [], "done": []}
+        return {"done": {}, "offset": 0}
     with state_path.open(encoding="utf-8") as file:
         state = json.load(file)
-    return {"sent": state.get("sent", []), "done": state.get("done", [])}
+    return {"done": _as_done_map(state.get("done")), "offset": int(state.get("offset", 0) or 0)}
+
+
+def _as_done_map(done: Any) -> dict[str, dict[str, str]]:
+    """Accept the current token map as well as the original list of raw ids."""
+    if isinstance(done, dict):
+        return {str(token): dict(record) for token, record in done.items()}
+    return {
+        deadline_token(str(identifier)): {"title": str(identifier), "due": ""}
+        for identifier in done or []
+    }
 
 
 def save_state(path: str | Path, state: dict[str, Any]) -> None:
     with Path(path).open("w", encoding="utf-8") as file:
-        json.dump(state, file, indent=2)
+        json.dump(state, file, indent=2, sort_keys=True)
         file.write("\n")
 
 
-def mark_sent(state: dict[str, Any], events: list[dict[str, Any]]) -> None:
-    sent = set(state.get("sent", []))
-    sent.update(event["id"] for event in events)
-    state["sent"] = sorted(sent)
+def mark_done(
+    state: dict[str, Any],
+    tokens: set[str],
+    events: list[dict[str, Any]],
+) -> list[str]:
+    """Record dismissals, labelling them from the events we just loaded."""
+    by_token = {deadline_token(event["id"]): event for event in events}
+    dismissed: list[str] = []
+    for token in sorted(tokens):
+        event = by_token.get(token)
+        state["done"][token] = {
+            "title": str(event["title"]) if event else "",
+            "due": event["due"].isoformat() if event else "",
+        }
+        dismissed.append(state["done"][token]["title"] or token)
+    return dismissed
+
+
+def prune_done(state: dict[str, Any], *, now: datetime) -> None:
+    """Forget dismissals whose deadline is long past, so state.json stays readable."""
+    cutoff = now - KEEP_DONE_FOR
+    kept: dict[str, dict[str, str]] = {}
+    for token, record in state["done"].items():
+        due = str(record.get("due", ""))
+        if due:
+            try:
+                if datetime.fromisoformat(due) < cutoff:
+                    continue
+            except ValueError:
+                LOGGER.debug("Keeping dismissal %s with unreadable due date %r", token, due)
+        kept[token] = record
+    state["done"] = kept

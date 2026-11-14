@@ -5,10 +5,20 @@ from __future__ import annotations
 import argparse
 import logging
 from datetime import datetime
-from pathlib import Path
 
 from core import HELSINKI, load_deadlines
-from notify import TelegramNotifier, build_digest, load_state, mark_sent, save_state
+from notify import (
+    TelegramNotifier,
+    active_deadlines,
+    build_digest,
+    done_buttons,
+    load_state,
+    mark_done,
+    prune_done,
+    save_state,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -24,14 +34,24 @@ def main() -> None:
     now = datetime.now(HELSINKI)
     events, failures = load_deadlines(args.sources, args.courses, args.ignore, now=now)
     state = load_state(args.state)
-    digest = build_digest(events, failures, now=now, done_ids=set(state["done"]))
 
     if args.dry_run:
-        print(digest)
+        print(build_digest(events, failures, now=now, done_tokens=set(state["done"])))
         return
 
-    TelegramNotifier().send(digest)
-    mark_sent(state, events)
+    notifier = TelegramNotifier()
+
+    # Nothing listens between daily runs, so collect yesterday's dismiss taps first.
+    tokens, state["offset"] = notifier.collect_done(state["offset"])
+    dismissed = mark_done(state, tokens, events)
+    if dismissed:
+        LOGGER.info("Dismissed since the last run: %s", ", ".join(dismissed))
+    prune_done(state, now=now)
+
+    done_tokens = set(state["done"])
+    digest = build_digest(events, failures, now=now, done_tokens=done_tokens)
+    shown = active_deadlines(events, now=now, done_tokens=done_tokens)
+    notifier.send(digest, done_buttons(shown))
     save_state(args.state, state)
 
 

@@ -1,7 +1,18 @@
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from notify import TelegramNotifier, build_digest
+from notify import (
+    TelegramNotifier,
+    build_digest,
+    deadline_token,
+    done_buttons,
+    load_state,
+    mark_done,
+    prune_done,
+    save_state,
+    split_message,
+)
 
 
 HELSINKI = ZoneInfo("Europe/Helsinki")
@@ -15,6 +26,17 @@ def event(identifier, title, days):
         "title": title,
         "due": NOW + timedelta(days=days, hours=4),
     }
+
+
+class Response:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
 
 
 def test_digest_groups_deadlines_and_reports_failures():
@@ -31,24 +53,28 @@ def test_digest_groups_deadlines_and_reports_failures():
 
 
 def test_digest_skips_done_and_reports_empty_result():
-    digest = build_digest([event("done", "Completed", 1)], now=NOW, done_ids={"done"})
+    digest = build_digest(
+        [event("done", "Completed", 1)],
+        now=NOW,
+        done_tokens={deadline_token("done")},
+    )
 
     assert digest == "Nothing due in the next 5 days."
+
+
+def test_digest_reports_failures_even_when_nothing_is_due():
+    digest = build_digest([], ["UEF: RequestException"], now=NOW)
+
+    assert digest.startswith("SOURCE FAILURES")
+    assert digest.endswith("Nothing due in the next 5 days.")
 
 
 def test_telegram_notifier_sends_message(monkeypatch):
     sent = {}
 
-    class Response:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"ok": True}
-
     def fake_post(url, *, json, timeout):
         sent.update(url=url, json=json, timeout=timeout)
-        return Response()
+        return Response({"ok": True})
 
     monkeypatch.setattr("notify.requests.post", fake_post)
     TelegramNotifier("token", "chat").send("digest")
@@ -58,3 +84,218 @@ def test_telegram_notifier_sends_message(monkeypatch):
         "json": {"chat_id": "chat", "text": "digest"},
         "timeout": 15,
     }
+
+
+def test_telegram_notifier_attaches_dismiss_buttons(monkeypatch):
+    sent = {}
+
+    def fake_post(url, *, json, timeout):
+        sent.update(json=json)
+        return Response({"ok": True})
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    buttons = done_buttons([event("essay-1@uef", "Essay submission", 1)])
+    TelegramNotifier("token", "chat").send("digest", buttons)
+
+    assert sent["json"]["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Essay submission",
+                    "callback_data": f"done:{deadline_token('essay-1@uef')}",
+                }
+            ]
+        ]
+    }
+
+
+def test_done_button_callback_data_fits_telegram_limit():
+    long_id = "a" * 500 + "@moodle.example.test"
+    button = done_buttons([event(long_id, "x" * 200, 1)])[0]
+
+    assert len(button["callback_data"].encode("utf-8")) <= 64
+    assert len(button["text"]) <= 42
+
+
+def test_collect_done_returns_tapped_tokens_and_next_offset(monkeypatch):
+    calls = []
+
+    def fake_post(url, *, json, timeout):
+        calls.append((url.rsplit("/", 1)[-1], json))
+        if url.endswith("/getUpdates"):
+            return Response(
+                {
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 41,
+                            "callback_query": {
+                                "id": "q1",
+                                "data": "done:abc123",
+                                "message": {"chat": {"id": "chat"}},
+                            },
+                        },
+                        {
+                            "update_id": 42,
+                            "callback_query": {
+                                "id": "q2",
+                                "data": "done:ignored",
+                                "message": {"chat": {"id": "someone-else"}},
+                            },
+                        },
+                    ],
+                }
+            )
+        return Response({"ok": True})
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    tokens, offset = TelegramNotifier("token", "chat").collect_done(7)
+
+    assert tokens == {"abc123"}
+    assert offset == 43
+    assert calls[0] == (
+        "getUpdates",
+        {"timeout": 0, "allowed_updates": ["callback_query"], "offset": 7},
+    )
+    assert "answerCallbackQuery" in [method for method, _ in calls]
+
+
+def test_collect_done_survives_stale_acknowledgement(monkeypatch):
+    def fake_post(url, *, json, timeout):
+        if url.endswith("/getUpdates"):
+            return Response(
+                {
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 5,
+                            "callback_query": {
+                                "id": "q1",
+                                "data": "done:abc123",
+                                "message": {"chat": {"id": "chat"}},
+                            },
+                        }
+                    ],
+                }
+            )
+        return Response({"ok": False, "description": "query is too old"})
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    tokens, offset = TelegramNotifier("token", "chat").collect_done(0)
+
+    assert tokens == {"abc123"}
+    assert offset == 6
+
+
+def test_mark_done_labels_dismissals_from_loaded_events():
+    state = {"done": {}, "offset": 0}
+    events = [event("essay-1@uef", "Essay submission", 1)]
+    token = deadline_token("essay-1@uef")
+
+    dismissed = mark_done(state, {token, "unknown"}, events)
+
+    assert state["done"][token]["title"] == "Essay submission"
+    assert state["done"][token]["due"].startswith("2030-01-02")
+    assert state["done"]["unknown"] == {"title": "", "due": ""}
+    assert "Essay submission" in dismissed
+
+
+def test_prune_done_drops_long_past_dismissals():
+    state = {
+        "done": {
+            "old": {"title": "Ancient", "due": "2029-10-01T12:00:00+03:00"},
+            "recent": {"title": "Fresh", "due": "2029-12-28T12:00:00+02:00"},
+            "unknown": {"title": "Migrated", "due": ""},
+        }
+    }
+
+    prune_done(state, now=NOW)
+
+    assert set(state["done"]) == {"recent", "unknown"}
+
+
+def test_state_round_trip_and_legacy_migration(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"sent": ["a", "b"], "done": ["essay-1@uef"]}), encoding="utf-8")
+
+    state = load_state(path)
+
+    assert "sent" not in state
+    assert state["offset"] == 0
+    assert deadline_token("essay-1@uef") in state["done"]
+
+    state["offset"] = 99
+    save_state(path, state)
+
+    assert load_state(path)["offset"] == 99
+
+
+def test_load_state_defaults_when_missing(tmp_path):
+    assert load_state(tmp_path / "absent.json") == {"done": {}, "offset": 0}
+
+
+def test_digest_phrases_day_counts_for_a_human():
+    digest = build_digest(
+        [
+            event("late", "Late", -2),
+            event("today", "Today", 0),
+            event("tomorrow", "Tomorrow", 1),
+            event("later", "Later", 4),
+        ],
+        now=NOW,
+    )
+
+    assert "(2d overdue)" in digest
+    assert "(due today)" in digest
+    assert "(due tomorrow)" in digest
+    assert "(in 4 days)" in digest
+    assert "days left" not in digest
+
+
+def test_digest_omits_an_empty_course_prefix():
+    uncategorised = event("bare", "Essay submission", 1)
+    uncategorised["course"] = "  "
+
+    digest = build_digest([uncategorised], now=NOW)
+
+    assert "- Essay submission —" in digest
+    assert ": Essay submission" not in digest
+
+
+def test_split_message_leaves_short_digests_alone():
+    assert split_message("short") == ["short"]
+
+
+def test_split_message_breaks_on_line_boundaries():
+    lines = [f"- Course: Assignment number {index}" for index in range(400)]
+    message = "\n".join(lines)
+    chunks = split_message(message)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 4096 for chunk in chunks)
+    assert "\n".join(chunks) == message, "splitting must not lose or alter any line"
+
+
+def test_split_message_cuts_a_single_oversized_line():
+    chunks = split_message("x" * 9000)
+
+    assert [len(chunk) for chunk in chunks] == [4096, 4096, 808]
+    assert "".join(chunks) == "x" * 9000
+
+
+def test_telegram_notifier_splits_long_digests_and_buttons_ride_the_last(monkeypatch):
+    sent = []
+
+    def fake_post(url, *, json, timeout):
+        sent.append(json)
+        return Response({"ok": True})
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    message = "\n".join(f"- Course: Assignment number {index}" for index in range(400))
+    buttons = done_buttons([event("essay-1@uef", "Essay submission", 1)])
+    TelegramNotifier("token", "chat").send(message, buttons)
+
+    assert len(sent) > 1
+    assert "reply_markup" not in sent[0]
+    assert "reply_markup" in sent[-1]
+    assert "\n".join(payload["text"] for payload in sent) == message
