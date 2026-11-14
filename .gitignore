@@ -1,0 +1,22 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Test and tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment overrides. Real values live in GitHub Actions secrets.
+.env
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
