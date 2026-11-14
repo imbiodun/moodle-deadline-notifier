@@ -1,5 +1,9 @@
 {
   "done": {
+    "5db9d4f8f2789f94": {
+      "due": "2026-11-15T23:59:00+02:00",
+      "title": "Weekly test 3 (answer by Sunday 15.11. 23:59) sulkeutuu"
+    },
     "a85afbba5d139d24": {
       "due": "2026-11-13T23:59:00+02:00",
       "title": "Final project on palautettava viimeist\u00e4\u00e4n"
@@ -9,7 +13,7 @@
       "title": "AI assignment on palautettava viimeist\u00e4\u00e4n"
     }
   },
-  "last_message_id": 7,
+  "last_message_id": 8,
   "last_sent": "2026-11-14",
-  "offset": 261740109
+  "offset": 261740119
 }
