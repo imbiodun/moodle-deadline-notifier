@@ -20,8 +20,11 @@ class WorkerDismissals:
     """Pending dismiss taps parked in the Worker's KV queue."""
 
     def __init__(self, base_url: str | None = None, secret: str | None = None) -> None:
-        self.base_url = (base_url or os.environ.get("DISMISS_API_URL", "")).rstrip("/")
-        self.secret = secret or os.environ.get("DISMISS_API_SECRET", "")
+        # Stripped because `gh secret set < file` keeps the file's trailing newline, and
+        # a secret that differs by one invisible byte fails as a flat 401 with nothing
+        # to distinguish it from a genuinely wrong value.
+        self.base_url = (base_url or os.environ.get("DISMISS_API_URL", "")).strip().rstrip("/")
+        self.secret = (secret or os.environ.get("DISMISS_API_SECRET", "")).strip()
         if not self.base_url or not self.secret:
             raise ValueError("DISMISS_API_URL and DISMISS_API_SECRET are required")
 

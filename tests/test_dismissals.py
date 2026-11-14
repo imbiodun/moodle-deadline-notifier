@@ -69,6 +69,22 @@ def test_acknowledge_drains_only_what_was_collected(monkeypatch):
     assert posted["json"] == {"tokens": ["aaa", "bbb"]}
 
 
+def test_trailing_whitespace_in_a_secret_does_not_break_the_header(monkeypatch):
+    called = {}
+
+    def fake_get(url, *, headers, timeout):
+        called.update(url=url, headers=headers)
+        return Response({"dismissals": []})
+
+    monkeypatch.setattr("dismissals.requests.get", fake_get)
+    # What `gh secret set DISMISS_API_SECRET < secret.txt` stores.
+    queue = WorkerDismissals("https://worker.example.test\n", "s3cret\n")
+    queue.collect()
+
+    assert called["url"] == "https://worker.example.test/dismissals"
+    assert called["headers"] == {"Authorization": "Bearer s3cret"}
+
+
 def test_acknowledge_skips_the_call_when_nothing_was_tapped(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("should not call the Worker with an empty token set")

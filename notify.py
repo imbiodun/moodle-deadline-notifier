@@ -38,8 +38,8 @@ class TelegramNotifier:
         bot_token: str | None = None,
         chat_id: str | None = None,
     ) -> None:
-        self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.bot_token = (bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+        self.chat_id = (chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
         if not self.bot_token or not self.chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
 
