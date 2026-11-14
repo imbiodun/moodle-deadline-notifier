@@ -6,12 +6,12 @@ compatibility_date = "2026-11-14"
 # Paste the returned id below; the binding name must stay DISMISSALS.
 [[kv_namespaces]]
 binding = "DISMISSALS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "e6d64bc2917141ce97f3c2f6e88c3c3d"
 
 [vars]
 # Not a secret: the chat id only identifies which chat may dismiss, and every write is
 # already gated on the Telegram webhook secret.
-TELEGRAM_CHAT_ID = "REPLACE_WITH_CHAT_ID"
+TELEGRAM_CHAT_ID = "6608294257"
 
 # Set as secrets, never as vars:
 #   wrangler secret put TELEGRAM_BOT_TOKEN
