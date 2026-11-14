@@ -10,7 +10,6 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-import requests
 import yaml
 from zoneinfo import ZoneInfo
 
@@ -28,54 +27,60 @@ def load_deadlines(
     *,
     now: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Load configured iCal sources, returning deadlines and source failures."""
+    """Load every configured source, returning deadlines and source failures."""
     sources = _read_yaml(sources_path) or []
     course_map = _read_yaml(courses_path) or {}
     ignore = _read_yaml(ignore_path) or {}
     current = _as_helsinki(now or datetime.now(HELSINKI))
+    earliest = current - timedelta(days=1)
+    config_dir = Path(sources_path).parent
     failures: list[str] = []
     records: dict[tuple[str, str], dict[str, Any]] = {}
 
     for source_config in sources:
         name = str(source_config.get("name", "unnamed source"))
-        source_type = source_config.get("type")
-        if source_type == "manual":
-            try:
-                events = load_manual(Path(sources_path).parent / "manual.yml", source=name)
-            except (OSError, KeyError, TypeError, ValueError) as exc:
-                failures.append(f"{name}: {type(exc).__name__}")
-                LOGGER.exception("Unable to load source %s", name)
-                continue
-            for event in events:
-                event = _normalize_event(event, course_map)
-                if not _ignored(event, ignore) and event["due"] >= current - timedelta(days=1):
-                    records[(event["source"], event["id"])] = event
-            continue
-        if source_type != "ical":
-            continue
-        secret_name = source_config.get("secret")
-        url = os.environ.get(secret_name, "") if secret_name else ""
-        if not url:
-            failures.append(f"{name}: feed URL is not configured")
-            LOGGER.error("%s: feed URL is not configured", name)
-            continue
+        # Fetching and normalizing share one guard: a source that breaks part way
+        # through should cost us that source, never the rest of the digest.
         try:
-            events = load_ical(url, source=name)
-        except (OSError, requests.RequestException, ValueError, TypeError) as exc:
+            for event in _fetch(source_config, name, config_dir):
+                event = _normalize_event(event, course_map)
+                if _ignored(event, ignore) or event["due"] < earliest:
+                    continue
+                records[(event["source"], event["id"])] = event
+        except SourceError as exc:
+            failures.append(f"{name}: {exc}")
+            LOGGER.error("%s: %s", name, exc)
+        except Exception as exc:
             failures.append(f"{name}: {type(exc).__name__}")
             LOGGER.exception("Unable to load source %s", name)
-            continue
-
-        for event in events:
-            event = _normalize_event(event, course_map)
-            if _ignored(event, ignore):
-                continue
-            due = event["due"]
-            if due < current - timedelta(days=1):
-                continue
-            records[(event["source"], event["id"])] = event
 
     return sorted(records.values(), key=lambda event: event["due"]), failures
+
+
+class SourceError(Exception):
+    """A source that cannot be read for a reportable, expected reason."""
+
+
+def _fetch(
+    source_config: dict[str, Any],
+    name: str,
+    config_dir: Path,
+) -> list[dict[str, Any]]:
+    """Resolve one source entry to its deadline records."""
+    source_type = str(source_config.get("type", "")).strip().casefold()
+
+    if source_type == "manual":
+        filename = str(source_config.get("path", "manual.yml"))
+        return load_manual(config_dir / filename, source=name)
+
+    if source_type == "ical":
+        secret_name = source_config.get("secret")
+        url = os.environ.get(str(secret_name), "") if secret_name else ""
+        if not url:
+            raise SourceError("feed URL is not configured")
+        return load_ical(url, source=name)
+
+    raise SourceError(f"unknown source type {source_config.get('type')!r}")
 
 
 def _read_yaml(path: str | Path) -> Any:
