@@ -45,6 +45,10 @@ jobs:
           TUNI_ICAL_URL: ${{ secrets.TUNI_ICAL_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Absent until the dismissal Worker is deployed, which keeps the run on
+          # getUpdates polling. Both set together switches it to the webhook queue.
+          DISMISS_API_URL: ${{ secrets.DISMISS_API_URL }}
+          DISMISS_API_SECRET: ${{ secrets.DISMISS_API_SECRET }}
         # Inverted deliberately: in `a && b || c` an empty-string b is falsy and
         # collapses to c, so the flag has to sit on the truthy side. On a schedule
         # event `inputs` is null, which negates to true and keeps the guard on.

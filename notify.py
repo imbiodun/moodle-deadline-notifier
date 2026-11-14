@@ -233,6 +233,7 @@ def build_digest(
     *,
     now: datetime,
     done_tokens: set[str] | None = None,
+    tap_hint: str = TAP_HINT,
 ) -> str:
     """Build the morning digest for overdue and five-day deadlines."""
     active = active_deadlines(events, now=now, done_tokens=done_tokens)
@@ -260,10 +261,10 @@ def build_digest(
 
     if not listed:
         sections.append("Nothing due in the next 5 days.")
-    else:
-        # Nothing listens between daily runs, so a tap sits in Telegram's queue until
-        # the next one drains it. Saying so stops the silence reading as a failure.
-        sections.append(TAP_HINT)
+    elif tap_hint:
+        # Only needed where a tap is silent until the next run. With the webhook Worker
+        # handling taps live, the button answers for itself and the hint is just noise.
+        sections.append(tap_hint)
     return "\n\n".join(sections)
 
 

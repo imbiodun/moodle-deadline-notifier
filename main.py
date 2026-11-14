@@ -7,7 +7,9 @@ import logging
 from datetime import datetime
 
 from core import HELSINKI, load_deadlines
+from dismissals import dismissal_source
 from notify import (
+    TAP_HINT,
     TelegramNotifier,
     active_deadlines,
     already_sent_today,
@@ -55,15 +57,28 @@ def main() -> None:
 
     notifier = TelegramNotifier()
 
-    # Nothing listens between daily runs, so collect yesterday's dismiss taps first.
-    tokens, state["offset"] = notifier.collect_done(state["offset"])
+    # The Worker answers taps as they happen and parks them in KV; without it, taps sit
+    # in Telegram's own queue until a run drains them. Setting a webhook makes getUpdates
+    # return 409, so only one of these paths can be live at a time.
+    queue = dismissal_source()
+    if queue:
+        tokens = queue.collect()
+    else:
+        tokens, state["offset"] = notifier.collect_done(state["offset"])
+
     dismissed = mark_done(state, tokens, events)
     if dismissed:
         LOGGER.info("Dismissed since the last run: %s", ", ".join(dismissed))
     prune_done(state, now=now)
 
     done_tokens = set(state["done"])
-    digest = build_digest(events, failures, now=now, done_tokens=done_tokens)
+    digest = build_digest(
+        events,
+        failures,
+        now=now,
+        done_tokens=done_tokens,
+        tap_hint="" if queue else TAP_HINT,
+    )
     shown = active_deadlines(events, now=now, done_tokens=done_tokens)
 
     # Retire yesterday's buttons first: their callback data still names live deadlines,
@@ -73,6 +88,10 @@ def main() -> None:
     state["last_message_id"] = notifier.send(digest, done_buttons(shown)) or 0
     record_digest_sent(state, now=now)
     save_state(args.state, state)
+
+    # Only now that the dismissals are on disk is it safe to drop them from the queue.
+    if queue:
+        queue.acknowledge(tokens)
 
 
 if __name__ == "__main__":

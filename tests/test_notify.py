@@ -340,6 +340,9 @@ def test_digest_explains_that_taps_land_on_the_next_run():
     # With no buttons to tap, the hint would just be noise.
     assert TAP_HINT not in build_digest([], now=NOW)
 
+    # Nor is it wanted once the webhook Worker answers taps on the spot.
+    assert TAP_HINT not in build_digest([event("urgent", "Soon", 2)], now=NOW, tap_hint="")
+
 
 def test_send_returns_the_message_id_carrying_the_buttons(monkeypatch):
     monkeypatch.setattr(
