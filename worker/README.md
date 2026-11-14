@@ -35,18 +35,20 @@ openssl rand -hex 32   # webhook secret, shared with Telegram
 openssl rand -hex 32   # API secret, shared with GitHub Actions
 ```
 
-**4. Store the Worker's secrets** (each prompts for the value):
+**4. Deploy**, and note the `https://deadline-dismissals.<subdomain>.workers.dev` URL:
+
+```bash
+wrangler deploy
+```
+
+**5. Store the Worker's secrets** (each prompts for the value). Secrets attach to a
+Worker that already exists, which is why this follows the deploy rather than preceding
+it; they take effect immediately, with no redeploy:
 
 ```bash
 wrangler secret put TELEGRAM_BOT_TOKEN       # same token as the GitHub secret
 wrangler secret put TELEGRAM_WEBHOOK_SECRET  # first generated secret
 wrangler secret put DISMISS_API_SECRET       # second generated secret
-```
-
-**5. Deploy**, and note the `https://deadline-dismissals.<subdomain>.workers.dev` URL:
-
-```bash
-wrangler deploy
 ```
 
 **6. Tell GitHub Actions about it — do this _before_ step 7.** Setting a webhook disables
