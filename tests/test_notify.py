@@ -2,7 +2,12 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+import requests
+
 from notify import (
+    RETRY_ATTEMPTS,
+    TAP_HINT,
     TelegramNotifier,
     already_sent_today,
     build_digest,
@@ -233,7 +238,12 @@ def test_state_round_trip_and_legacy_migration(tmp_path):
 
 
 def test_load_state_defaults_when_missing(tmp_path):
-    assert load_state(tmp_path / "absent.json") == {"done": {}, "offset": 0, "last_sent": ""}
+    assert load_state(tmp_path / "absent.json") == {
+        "done": {},
+        "offset": 0,
+        "last_sent": "",
+        "last_message_id": 0,
+    }
 
 
 def test_digest_phrases_day_counts_for_a_human():
@@ -321,3 +331,105 @@ def test_last_sent_survives_a_state_round_trip(tmp_path):
     save_state(path, state)
 
     assert already_sent_today(load_state(path), now=NOW)
+
+
+def test_digest_explains_that_taps_land_on_the_next_run():
+    listed = build_digest([event("urgent", "Soon", 2)], now=NOW)
+    assert listed.endswith(TAP_HINT)
+
+    # With no buttons to tap, the hint would just be noise.
+    assert TAP_HINT not in build_digest([], now=NOW)
+
+
+def test_send_returns_the_message_id_carrying_the_buttons(monkeypatch):
+    monkeypatch.setattr(
+        "notify.requests.post",
+        lambda url, *, json, timeout: Response({"ok": True, "result": {"message_id": 77}}),
+    )
+
+    assert TelegramNotifier("token", "chat").send("digest") == 77
+
+
+def test_clear_buttons_edits_the_previous_digest(monkeypatch):
+    calls = []
+
+    def fake_post(url, *, json, timeout):
+        calls.append((url, json))
+        return Response({"ok": True})
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    notifier = TelegramNotifier("token", "chat")
+    notifier.clear_buttons(77)
+
+    assert calls == [
+        (
+            "https://api.telegram.org/bottoken/editMessageReplyMarkup",
+            {"chat_id": "chat", "message_id": 77},
+        )
+    ]
+
+    # No previous digest on the very first run, so there is nothing to strip.
+    notifier.clear_buttons(0)
+    assert len(calls) == 1
+
+
+def test_clear_buttons_survives_an_uneditable_message(monkeypatch):
+    def fake_post(url, *, json, timeout):
+        raise requests.ConnectionError("boom")
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    monkeypatch.setattr("notify.time.sleep", lambda seconds: None)
+
+    TelegramNotifier("token", "chat").clear_buttons(77)  # must not raise
+
+
+def test_call_retries_a_dropped_connection(monkeypatch):
+    attempts = []
+    slept = []
+
+    def fake_post(url, *, json, timeout):
+        attempts.append(json)
+        if len(attempts) < 3:
+            raise requests.ConnectionError("Connection reset by peer")
+        return Response({"ok": True, "result": {"message_id": 5}})
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    monkeypatch.setattr("notify.time.sleep", slept.append)
+
+    assert TelegramNotifier("token", "chat").send("digest") == 5
+    assert len(attempts) == 3
+    assert slept == [2.0, 4.0]  # backoff doubles between attempts
+
+
+def test_call_gives_up_after_the_last_attempt(monkeypatch):
+    attempts = []
+
+    def fake_post(url, *, json, timeout):
+        attempts.append(json)
+        raise requests.ConnectionError("Connection reset by peer")
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    monkeypatch.setattr("notify.time.sleep", lambda seconds: None)
+
+    with pytest.raises(requests.ConnectionError):
+        TelegramNotifier("token", "chat").send("digest")
+    assert len(attempts) == RETRY_ATTEMPTS
+
+
+def test_call_does_not_retry_a_rejected_request(monkeypatch):
+    attempts = []
+
+    def fake_post(url, *, json, timeout):
+        attempts.append(json)
+        error = requests.HTTPError("400 Bad Request")
+        error.response = Response({"ok": False})
+        error.response.status_code = 400
+        raise error
+
+    monkeypatch.setattr("notify.requests.post", fake_post)
+    monkeypatch.setattr("notify.time.sleep", lambda seconds: None)
+
+    # A malformed request fails the same way every time; retrying only delays the run.
+    with pytest.raises(requests.HTTPError):
+        TelegramNotifier("token", "chat").send("digest")
+    assert len(attempts) == 1

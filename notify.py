@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,9 @@ LOGGER = logging.getLogger(__name__)
 DONE_PREFIX = "done:"
 KEEP_DONE_FOR = timedelta(days=30)
 MESSAGE_LIMIT = 4096  # Telegram's hard cap on sendMessage text
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF = 2.0  # seconds before the first retry, doubled each time
+TAP_HINT = "✅ Tap to dismiss — it clears on tomorrow's digest, not right away."
 
 
 class Notifier(Protocol):
@@ -39,7 +43,8 @@ class TelegramNotifier:
         if not self.bot_token or not self.chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
 
-    def send(self, message: str, buttons: list[dict[str, str]] | None = None) -> None:
+    def send(self, message: str, buttons: list[dict[str, str]] | None = None) -> int | None:
+        """Deliver the digest, returning the id of the message carrying the buttons."""
         chunks = split_message(message)
         for chunk in chunks[:-1]:
             self._call("sendMessage", {"chat_id": self.chat_id, "text": chunk})
@@ -48,7 +53,27 @@ class TelegramNotifier:
         payload: dict[str, Any] = {"chat_id": self.chat_id, "text": chunks[-1]}
         if buttons:
             payload["reply_markup"] = {"inline_keyboard": [[button] for button in buttons]}
-        self._call("sendMessage", payload)
+        sent = self._call("sendMessage", payload)
+        return int(sent["message_id"]) if isinstance(sent, dict) and "message_id" in sent else None
+
+    def clear_buttons(self, message_id: int | None) -> None:
+        """Strip the dismiss buttons from an earlier digest.
+
+        Yesterday's buttons stay tappable forever otherwise, and because callback data
+        is keyed to the deadline rather than the message, tapping a stale one silently
+        re-dismisses a deadline that was already restored.
+        """
+        if not message_id:
+            return
+        try:
+            self._call(
+                "editMessageReplyMarkup",
+                {"chat_id": self.chat_id, "message_id": message_id},
+            )
+        except (requests.RequestException, RuntimeError):
+            # Telegram refuses edits to messages older than 48h, and the digest is
+            # replaced daily anyway, so a failure here costs nothing.
+            LOGGER.debug("Could not clear buttons on message %s", message_id)
 
     def collect_done(self, offset: int = 0) -> tuple[set[str], int]:
         """Drain dismiss taps queued since the last run, with the offset to store next."""
@@ -87,6 +112,27 @@ class TelegramNotifier:
             LOGGER.debug("Could not acknowledge callback %s", query_id)
 
     def _call(self, method: str, payload: dict[str, Any]) -> Any:
+        """Call one Bot API method, retrying the failures that are worth retrying.
+
+        A single dropped connection used to cost the whole digest: the run dies before
+        save_state, so the day's reminder never arrives. Retrying a send risks posting
+        twice if the reset happened after Telegram accepted the request, which is much
+        the lesser problem of the two.
+        """
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                return self._request(method, payload)
+            except requests.RequestException as exc:
+                if attempt == RETRY_ATTEMPTS or not _retryable(exc):
+                    raise
+                delay = RETRY_BACKOFF * 2 ** (attempt - 1)
+                LOGGER.warning(
+                    "%s failed (%s); retrying in %.0fs", method, type(exc).__name__, delay
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")  # the loop either returns or raises
+
+    def _request(self, method: str, payload: dict[str, Any]) -> Any:
         response = requests.post(
             f"https://api.telegram.org/bot{self.bot_token}/{method}",
             json=payload,
@@ -97,6 +143,19 @@ class TelegramNotifier:
         if not result.get("ok", False):
             raise RuntimeError(f"Telegram rejected the {method} request")
         return result.get("result")
+
+
+def _retryable(exc: requests.RequestException) -> bool:
+    """Whether a failed Bot API call is worth attempting again.
+
+    Connection resets and timeouts are transient. So are Telegram's own 5xx and its
+    429 rate limit. A 400 is us sending something malformed, and no amount of retrying
+    will change the answer.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return True
+    return response.status_code == 429 or response.status_code >= 500
 
 
 def split_message(message: str, limit: int = MESSAGE_LIMIT) -> list[str]:
@@ -201,6 +260,10 @@ def build_digest(
 
     if not listed:
         sections.append("Nothing due in the next 5 days.")
+    else:
+        # Nothing listens between daily runs, so a tap sits in Telegram's queue until
+        # the next one drains it. Saying so stops the silence reading as a failure.
+        sections.append(TAP_HINT)
     return "\n\n".join(sections)
 
 
@@ -225,13 +288,14 @@ def _when(days_left: int) -> str:
 def load_state(path: str | Path) -> dict[str, Any]:
     state_path = Path(path)
     if not state_path.exists():
-        return {"done": {}, "offset": 0, "last_sent": ""}
+        return {"done": {}, "offset": 0, "last_sent": "", "last_message_id": 0}
     with state_path.open(encoding="utf-8") as file:
         state = json.load(file)
     return {
         "done": _as_done_map(state.get("done")),
         "offset": int(state.get("offset", 0) or 0),
         "last_sent": str(state.get("last_sent", "")),
+        "last_message_id": int(state.get("last_message_id", 0) or 0),
     }
 
 

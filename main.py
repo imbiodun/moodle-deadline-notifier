@@ -65,7 +65,12 @@ def main() -> None:
     done_tokens = set(state["done"])
     digest = build_digest(events, failures, now=now, done_tokens=done_tokens)
     shown = active_deadlines(events, now=now, done_tokens=done_tokens)
-    notifier.send(digest, done_buttons(shown))
+
+    # Retire yesterday's buttons first: their callback data still names live deadlines,
+    # so a late tap on the old digest would dismiss one without it ever being shown.
+    notifier.clear_buttons(state.get("last_message_id"))
+
+    state["last_message_id"] = notifier.send(digest, done_buttons(shown)) or 0
     record_digest_sent(state, now=now)
     save_state(args.state, state)
 
